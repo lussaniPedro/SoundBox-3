@@ -1,6 +1,7 @@
 import os
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "hide"
 
+import re
 import time
 import pygame
 import colorama
@@ -15,6 +16,45 @@ print(colorama.Fore.GREEN + colorama.Style.BRIGHT)
 
 def clear_terminal():
     subprocess.run("cls" if os.name == "nt" else "clear")
+
+def get_x11_power_state():
+    return subprocess.run(["xset", "q"], capture_output=True, text=True).stdout
+
+def get_screen_saver_timeout(xset_output):
+    for line in xset_output.splitlines():
+        match = re.search(r"timeout:\s*(\d+)", line)
+
+        if match:
+            return int(match.group(1))
+
+    return None
+
+def is_dpms_enabled(xset_output):
+    return "DPMS is Enabled" in xset_output
+
+def enable_screen_power():
+    subprocess.run(["xset", "+dpms"])
+
+def disable_screen_power():
+    x11_output = get_x11_power_state()
+    
+    power_state = {
+        "screen_timeout": get_screen_saver_timeout(x11_output),
+        "dpms_enabled": is_dpms_enabled(x11_output)
+    }
+
+    subprocess.run(["xset", "s", "0"])
+    subprocess.run(["xset", "-dpms"])
+
+    return power_state
+
+def restore_screen_power(power_state):
+    subprocess.run(["xset", "s", str(power_state["screen_timeout"])])
+
+    if power_state["dpms_enabled"]:
+        subprocess.run(["xset", "+dpms"])
+    else:
+        subprocess.run(["xset", "-dpms"])
 
 def start_cava():
     global cava_process
@@ -113,8 +153,22 @@ def command_listener(start_event, paused_event, stop_event, state):
                 loop_menu = False
 
             else:
-                print(colorama.Fore.RED + "Invalid command" + colorama.Fore.GREEN)
-                time.sleep(1.5)
+                if not stop_event.is_set() and command:
+                    print(colorama.Fore.RED + "Invalid command" + colorama.Fore.GREEN)
+                    time.sleep(1.5)
+
+                    status = (
+                        colorama.Fore.YELLOW + "Paused" + colorama.Fore.GREEN
+                        if paused_event.is_set()
+                        else "Playing"
+                    )
+
+                    render_loop_menu(
+                        state["current_song"],
+                        state["playlist_name"],
+                        status,
+                        state["loop"]
+                    )
 
             if not stop_event.is_set() and not loop_menu:
                 status = colorama.Fore.YELLOW + "Paused" + colorama.Fore.GREEN if paused_event.is_set() else "Playing"
@@ -166,26 +220,41 @@ def command_listener(start_event, paused_event, stop_event, state):
                 print(colorama.Fore.RED + "Invalid command" + colorama.Fore.GREEN)
                 time.sleep(1.5)
 
+                status = (
+                    colorama.Fore.YELLOW + "Paused" + colorama.Fore.GREEN
+                    if paused_event.is_set()
+                    else "Playing"
+                )
+
+                render_player_ui(
+                    state["current_song"],
+                    state["playlist_name"],
+                    status,
+                    state["loop"]
+                )
+
 def play(folder, mp3_files, start_index, state):
-    start_event = threading.Event()
-
-    paused_event = threading.Event()
-    paused_event.clear()
-
-    stop_event = threading.Event()
-
-    listener = threading.Thread(
-        target=command_listener,
-        args=(start_event, paused_event, stop_event, state),
-        daemon=True
-    )
-    listener.start()
-
-    state["index"] = start_index
-
-    start_cava()
+    power_state = disable_screen_power()
 
     try:
+        start_event = threading.Event()
+
+        paused_event = threading.Event()
+        paused_event.clear()
+
+        stop_event = threading.Event()
+
+        listener = threading.Thread(
+            target=command_listener,
+            args=(start_event, paused_event, stop_event, state),
+            daemon=True
+        )
+        listener.start()
+
+        state["index"] = start_index
+
+        start_cava()
+
         while True:
             i = state["index"]
 
@@ -261,7 +330,7 @@ def play(folder, mp3_files, start_index, state):
 
     finally:
         pygame.mixer.music.stop()
-        stop_cava()
+        restore_screen_power(power_state)
 
 def select_playlist():
     playlists_folder = "playlists"
@@ -289,11 +358,12 @@ def select_playlist():
         for index, playlist in enumerate(playlists, start=1):
             playlist_path = os.path.join(playlists_folder, playlist)
             mp3_count = len([f for f in os.listdir(playlist_path) if f.endswith(".mp3")])
-            print(f"{index}. {playlist} ({mp3_count} songs)")
+            print(f"{index:02}. {playlist} ({mp3_count} songs)")
 
         choice_input = input("\nSelect a playlist (or 'Q' to quit): ").strip()
 
         if choice_input.upper() == "Q":
+            stop_cava()
             return None
 
         if not choice_input.isdigit():
@@ -340,7 +410,7 @@ def main():
             print("My song list:")
 
             for index, song in enumerate(mp3_files, start=1):
-                print(f"{index}. {song}")
+                print(f"{index:02}. {song}")
 
             choice_input = input("\nEnter the song # to play (or 'B' to go back): ")
 
