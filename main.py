@@ -7,23 +7,77 @@ import colorama
 import threading
 import sys
 import select
+import subprocess
+
+cava_process = None
 
 print(colorama.Fore.GREEN + colorama.Style.BRIGHT)
 
 def clear_terminal():
-    os.system("cls" if os.name == "nt" else "clear")
+    subprocess.run("cls" if os.name == "nt" else "clear")
 
-def render_player_ui(song_name, playlist_name, status="Playing"):
+def start_cava():
+    global cava_process
+
+    if cava_process is not None:
+        return
+
+    cava_process = subprocess.Popen(
+        [
+            "konsole",
+            "--separate",
+            "-e",
+            "cava"
+        ]
+    )
+
+
+def stop_cava():
+    global cava_process
+
+    if cava_process is not None:
+        cava_process.terminate()
+
+        try:
+            cava_process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            cava_process.kill()
+
+        cava_process = None
+
+def render_player_ui(song_name, playlist_name, status="Playing", loop_mode="None"):
     clear_terminal()
-    print("🎧 MP3 PLAYER\n")
+    print("🎧 SoundBox 3 📦\n")
+
     print(f"🎵 Now playing: {song_name}")
     print(f"📁 Playlist: {playlist_name}")
-    print(f"⏯️ Status: {status}\n")
-    print("[P] Pause | [B] Previous | [R] Resume | [N] Next | [S] Stop")
+    print(f"⏯️ Status: {status}")
+    print(f"🔁 Loop: {loop_mode.capitalize()}\n")
+
+    if status == "Playing":
+        print("[P] Pause | [B] Previous | [N] Next | [L] Loop | [S] Stop")
+    else:
+        print("[R] Resume | [B] Previous | [N] Next | [L] Loop | [S] Stop")
+
+    print("> ", end="", flush=True)
+
+def render_loop_menu(song_name, playlist_name, status="Playing", loop_mode="None"):
+    clear_terminal()
+    print("🎧 SoundBox 3 📦\n")
+
+    print(f"🎵 Now playing: {song_name}")
+    print(f"📁 Playlist: {playlist_name}")
+    print(f"⏯️ Status: {status}")
+    print(f"🔁 Loop: {loop_mode.capitalize()}\n")
+
+    print("What do you want to loop?")
+    print("[S] Song | [P] Playlist | [N] No loop | [B] Back")
     print("> ", end="", flush=True)
 
 def command_listener(start_event, paused_event, stop_event, state):
     start_event.wait()
+
+    loop_menu = False
 
     while not stop_event.is_set():
         if os.name == 'nt':  # Windows
@@ -42,25 +96,66 @@ def command_listener(start_event, paused_event, stop_event, state):
         if stop_event.is_set():
             break
 
+        if loop_menu:
+            if command == "S":
+                state["loop"] = "song"
+                loop_menu = False
+
+            elif command == "P":
+                state["loop"] = "playlist"
+                loop_menu = False
+
+            elif command == "N":
+                state["loop"] = "none"
+                loop_menu = False
+
+            elif command == "B":
+                loop_menu = False
+
+            else:
+                print(colorama.Fore.RED + "Invalid command" + colorama.Fore.GREEN)
+                time.sleep(1.5)
+
+            if not stop_event.is_set() and not loop_menu:
+                status = colorama.Fore.YELLOW + "Paused" + colorama.Fore.GREEN if paused_event.is_set() else "Playing"
+
+                render_player_ui(state["current_song"], state["playlist_name"], status, state["loop"])
+
+            continue
+
         if command == "P":
             pygame.mixer.music.pause()
             print(colorama.Fore.YELLOW + "Paused\n" + colorama.Fore.GREEN)
 
             paused_event.set()
-            render_player_ui(state["current_song"], state["playlist_name"], colorama.Fore.YELLOW + "Paused" + colorama.Fore.GREEN)
+            render_player_ui(state["current_song"], state["playlist_name"], colorama.Fore.YELLOW + "Paused" + colorama.Fore.GREEN, state["loop"])
         elif command == "R":
             pygame.mixer.music.unpause()
             print(colorama.Fore.YELLOW + "Resumed\n" + colorama.Fore.GREEN)
 
             paused_event.clear()
-            render_player_ui(state["current_song"], state["playlist_name"], "Playing")
+            render_player_ui(state["current_song"], state["playlist_name"], "Playing", state["loop"])
         elif command == "N":
+            pygame.mixer.music.unpause()
+            paused_event.clear()
+
             pygame.mixer.music.stop()
             state["action"] = "next"
 
         elif command == "B":
+            pygame.mixer.music.unpause()
+            paused_event.clear()
+
             pygame.mixer.music.stop()
             state["action"] = "prev"
+
+        elif command == "L":
+            loop_menu = True
+
+            if paused_event.is_set():
+                render_loop_menu(state["current_song"], state["playlist_name"], colorama.Fore.YELLOW + "Paused" + colorama.Fore.GREEN, state["loop"])
+            else:
+                render_loop_menu(state["current_song"], state["playlist_name"], "Playing", state["loop"])
 
         elif command == "S":
             pygame.mixer.music.stop()
@@ -79,66 +174,94 @@ def play(folder, mp3_files, start_index, state):
 
     stop_event = threading.Event()
 
-    listener = threading.Thread(target=command_listener, args=(start_event, paused_event, stop_event, state), daemon=True)
+    listener = threading.Thread(
+        target=command_listener,
+        args=(start_event, paused_event, stop_event, state),
+        daemon=True
+    )
     listener.start()
 
     state["index"] = start_index
 
-    while True:
-        i = state["index"]
-        if i < 0 or i >= len(mp3_files):
-            stop_event.set()
-            return
+    start_cava()
 
-        song = mp3_files[i]
-        path = os.path.join(folder, song)
-
-        pygame.mixer.music.load(path)
-        pygame.mixer.music.play()
-
-        state["current_song"] = song
-        render_player_ui(song, state["playlist_name"])
-
-        start_event.set()
-
+    try:
         while True:
-            if stop_event.is_set():
-                pygame.mixer.music.stop()
-                return
+            i = state["index"]
 
-            if paused_event.is_set():
-                time.sleep(0.2)
-                continue
-
-            if state["action"] in ["prev", "next", "stop"]:
-                pygame.mixer.music.stop()
-                break
-
-            if not paused_event.is_set() and not pygame.mixer.music.get_busy():
-                state["action"] = "next"
-                break
-
-            time.sleep(0.3)
-
-        if stop_event.is_set():
-            return
-
-        if state["action"] == "next":
-            if state["index"] >= len(mp3_files) - 1:
+            if i < 0 or i >= len(mp3_files):
                 stop_event.set()
                 return
-            else:
-                state["index"] += 1
 
-        elif state["action"] == "prev":
-            if state["index"] > 0:
-                state["index"] -= 1
+            song = mp3_files[i]
+            path = os.path.join(folder, song)
 
-        elif state["action"] == "stop":
-            stop_event.set()
-            return
+            pygame.mixer.music.load(path)
+            pygame.mixer.music.play()
 
-        state["action"] = None
+            state["current_song"] = song
+
+            status = colorama.Fore.YELLOW + "Paused" + colorama.Fore.GREEN if paused_event.is_set() else "Playing"
+
+            render_player_ui(song, state["playlist_name"], status, state["loop"])
+
+            start_event.set()
+
+            while True:
+                if stop_event.is_set():
+                    pygame.mixer.music.stop()
+                    return
+
+                if paused_event.is_set():
+                    time.sleep(0.2)
+                    continue
+
+                if state["action"] in ["prev", "next", "stop"]:
+                    pygame.mixer.music.stop()
+                    break
+
+                if(not paused_event.is_set() and not pygame.mixer.music.get_busy()):
+                    if state["loop"] == "song":
+                        state["action"] = "repeat"
+                    else:
+                        state["action"] = "next"
+
+                    break
+
+                time.sleep(0.3)
+
+            if stop_event.is_set():
+                return
+
+            if state["action"] == "repeat":
+                pass
+
+            elif state["action"] == "next":
+                if state["index"] >= len(mp3_files) - 1:
+                    if state["loop"] == "playlist":
+                        state["index"] = 0
+                    else:
+                        stop_event.set()
+                        return
+
+                else:
+                    state["index"] += 1
+
+            elif state["action"] == "prev":
+                if state["index"] > 0:
+                    state["index"] -= 1
+                else:
+                    state["index"] = len(mp3_files) - 1
+
+            elif state["action"] == "stop":
+                stop_event.set()
+                return
+
+            state["action"] = None
+
+    finally:
+        pygame.mixer.music.stop()
+        stop_cava()
 
 def select_playlist():
     playlists_folder = "playlists"
@@ -235,7 +358,8 @@ def main():
                 "current_song": None,
                 "playlist_name": playlist_name,
                 "index": 0,
-                "action": None
+                "action": None,
+                "loop": "none"
             }
             if 0 <= choice < len(mp3_files):
                 play(folder, mp3_files, choice, state)
